@@ -27,9 +27,9 @@ from datetime import datetime, timedelta
 from selenium.webdriver.chrome.service import Service as ChromeService
 
 class Claimer():
-
     settings_file = "variables.txt"
     status_file_path = "status.txt"
+    start_app_xpath = None
     settings = {}
     driver = None
     target_element = None
@@ -94,7 +94,6 @@ class Claimer():
 
         # Define our base path for debugging screenshots
         self.screenshot_base = os.path.join(self.screenshots_path, "screenshot")
-
 
         if self.settings["useProxy"] and self.settings["proxyAddress"] == "http://127.0.0.1:8080":
             self.run_http_proxy()
@@ -223,7 +222,7 @@ class Claimer():
             json.dump(self.settings, f)
         self.output("Settings saved successfully.", 3)
 
-    def output(self, string, level):
+    def output(self, string, level=2):
         if self.settings['verboseLevel'] >= level:
             print(string)
 
@@ -347,10 +346,24 @@ class Claimer():
         return self.prefix+user_input
 
     def prompt_user_agent(self):
-        user_agent = input("Please enter the User-Agent string you wish to use: ").strip()
+        print (f"Step {self.step} - Please enter the User-Agent string you wish to use or press enter for default.")
+        user_agent = input(f"Step {self.step} - User-Agent: ").strip()
         return user_agent
 
-    
+    def set_cookies(self):
+        if not (self.forceRequestUserAgent or self.settings["requestUserAgent"]):
+            cookies_path = f"{self.session_path}/cookies.json"
+            cookies = self.driver.get_cookies()
+            with open(cookies_path, 'w') as file:
+                json.dump(cookies, file)
+        else:
+            user_agent = self.prompt_user_agent()
+            cookies_path = f"{self.session_path}/cookies.json"
+            cookies = self.driver.get_cookies()
+            cookies.append({"name": "user_agent", "value": user_agent})  # Save user agent to cookies
+            with open(cookies_path, 'w') as file:
+                json.dump(cookies, file)
+
     def setup_driver(self):
         chrome_options = Options()
         chrome_options.add_argument(f"user-data-dir={self.session_path}")
@@ -667,7 +680,7 @@ class Claimer():
             self.move_and_click(xpath, 8, True, "check for 'STORAGE_OFFLINE'", self.step, "visible")
             if self.target_element:
                 self.output(f"Step {self.step} - ***Progress is blocked by a 'STORAGE_OFFLINE' button",1)
-                self.output(f"Step {self.step} - If you are re-using an old Wallet session; try to delete or create a new session.",1)
+                self.output(f"Step {self.step} - If you are re-usi,ng an old Wallet session; try to delete or create a new session.",1)
                 found_error = True
             # Check for flood wait
             xpath = "//button[contains(text(), 'FLOOD_WAIT')]"
@@ -740,7 +753,6 @@ class Claimer():
                 screenshot_path = f"{self.screenshots_path}/Step {self.step} - error_Something_Bad_Occurred.png"
                 self.driver.save_screenshot(screenshot_path)
 
-
     def next_steps(self):
         # Must OVERRIDE this function in the child class
         self.output("Function 'next-steps' - Not defined (Need override in child class) \n", 1)
@@ -778,6 +790,7 @@ class Claimer():
         self.increase_step()
 
         # New link logic to avoid finding an expired link
+        self.start_app_xpath = "//div[contains(@class, 'reply-markup-row')]//a[contains(@href, 'https://t.me/HexacoinBot/wallet?startapp=play')]"
         if self.find_working_link(self.step):
             self.increase_step()
         else:
@@ -1075,10 +1088,72 @@ class Claimer():
             except Exception as e:
                 self.output(f"An error occurred: {e}", 3)
                 if self.settings['debugIsOn']:
+                    # Take a screenshot on error
                     screenshot_path = f"{self.screenshots_path}/{self.step}_monitor_element_error.png"
                     self.driver.save_screenshot(screenshot_path)
                     self.output(f"Screenshot saved to {screenshot_path}", 3)
-        return "Unknown"
+                
+                    # Save the HTML page source on error
+                    page_source = self.driver.page_source
+                    with open(f"{self.screenshots_path}/{self.step}_page_source.html", "w", encoding="utf-8") as f:
+                        f.write(page_source)
+                
+                    # Save browser console logs on error
+                    logs = self.driver.get_log("browser")
+                    with open(f"{self.screenshots_path}/{self.step}_browser_console_logs.txt", "w", encoding="utf-8") as f:
+                        for log in logs:
+                            f.write(f"{log['level']}: {log['message']}\n")
+            return "Unknown"
+
+    def find_working_link(self, old_step):
+        self.output(f"Step {self.step} - Attempting to open a link for the app...", 2)
+
+        start_app_xpath = self.start_app_xpath
+
+        try:
+            start_app_buttons = WebDriverWait(self.driver, 5).until(EC.presence_of_all_elements_located((By.XPATH, start_app_xpath)))
+            clicked = False
+
+            for button in reversed(start_app_buttons):
+                actions = ActionChains(self.driver)
+                actions.move_to_element(button).pause(0.2)
+                try:
+                    if self.settings['debugIsOn']:
+                        self.driver.save_screenshot(f"{self.screenshots_path}/{self.step} - Find working link.png")
+                    actions.perform()
+                    self.driver.execute_script("arguments[0].click();", button)
+                    clicked = True
+                    break
+                except StaleElementReferenceException:
+                    continue
+                except ElementClickInterceptedException:
+                    continue
+
+            if not clicked:
+                self.output(f"Step {self.step} - None of the 'Open Wallet' buttons were clickable.\n", 1)
+                if self.settings['debugIsOn']:
+                    screenshot_path = f"{self.screenshots_path}/{self.step}-no-clickable-button.png"
+                    self.driver.save_screenshot(screenshot_path)
+                return False
+            else:
+                self.output(f"Step {self.step} - Successfully able to open a link for the app..\n", 3)
+                if self.settings['debugIsOn']:
+                    screenshot_path = f"{self.screenshots_path}/{self.step}-app-opened.png"
+                    self.driver.save_screenshot(screenshot_path)
+                return True
+
+        except TimeoutException:
+            self.output(f"Step {self.step} - Failed to find the 'Open Wallet' button within the expected timeframe.\n", 1)
+            if self.settings['debugIsOn']:
+                screenshot_path = f"{self.screenshots_path}/{self.step}-timeout-finding-button.png"
+                self.driver.save_screenshot(screenshot_path)
+            return False
+        except Exception as e:
+            self.output(f"Step {self.step} - An error occurred while trying to open the app: {e}\n", 1)
+            if self.settings['debugIsOn']:
+                screenshot_path = f"{self.screenshots_path}/{self.step}-unexpected-error-opening-app.png"
+                self.driver.save_screenshot(screenshot_path)
+            return False
 
     def validate_seed_phrase(self):
         # Let's take the user inputed seed phrase and carry out basic validation
